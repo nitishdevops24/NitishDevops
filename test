@@ -60,10 +60,7 @@ def performRollback(database, action, schema, tag, rollbackDate, rollbackCount) 
     // Execute the Liquibase command
     sh liquibaseCommand
 
-    // Upload log file to S3
-    sh "aws s3 cp ${logFile} s3://${S3_BUCKET}/${s3LogKey}"
-
-    return s3LogKey
+    return logFile
 }
 
 pipeline {
@@ -116,12 +113,6 @@ pipeline {
     }
 
     stages {
-        stage('Checkout SCM') {
-            steps {
-                checkout scmGit(branches: [[name: '*/master']], extensions: [], userRemoteConfigs: [[credentialsId: 'github-liquibase-poc', url: 'https://github.com/department-of-veterans-affairs/crp-db-liquibase-poc.git']])
-            }
-        }
-
         stage('Rollback') {
             steps {
                 toolLiquibase()
@@ -133,8 +124,19 @@ pipeline {
                     def rollbackDate = params.ROLLBACK_DATE
                     def rollbackCount = params.ROLLBACK_COUNT
 
-                    // Perform rollback and capture the S3 log key
-                    env.S3_LOG_KEY = performRollback(database, action, schema, tag, rollbackDate, rollbackCount)
+                    // Perform rollback and get the log file path
+                    def logFile = performRollback(database, action, schema, tag, rollbackDate, rollbackCount)
+
+                    // Upload log file to S3
+                    def s3LogKey = "${S3_PREFIX}/${database}-rollback-${new Date().format("yyyyMMddHHmmss")}.json"
+                    sh "aws s3 cp ${logFile} s3://${S3_BUCKET}/${s3LogKey}" 
+
+                    // Check if the upload was successful
+                    if (currentBuild.resultIsBetterOrEqualTo('SUCCESS')) {
+                        echo "Log file successfully uploaded to S3: s3://${S3_BUCKET}/${s3LogKey}"
+                    } else {
+                        error "Failed to upload log file to S3."
+                    }
                 }
             }
         }
@@ -143,13 +145,13 @@ pipeline {
     post {
         success {
             script {
-                slackSend(channel: env.SLACK_CHANNEL, color: 'good', message: "Liquibase rollback to ${params.DATABASE} with action ${params.ROLLBACK_ACTION} successful! Logs available at s3://${S3_BUCKET}/${env.S3_LOG_KEY}")
+                slackSend(channel: env.SLACK_CHANNEL, color: 'good', message: "Liquibase rollback to ${params.DATABASE} with action ${params.ROLLBACK_ACTION} successful! Logs available at s3://${S3_BUCKET}/${s3LogKey}")
             }
         }
 
         failure {
             script {
-                slackSend(channel: env.SLACK_CHANNEL, color: 'danger', message: "Liquibase rollback to ${params.DATABASE} with action ${params.ROLLBACK_ACTION} failed. Check the logs at s3://${S3_BUCKET}/${env.S3_LOG_KEY} and investigate.")
+                slackSend(channel: env.SLACK_CHANNEL, color: 'danger', message: "Liquibase rollback to ${params.DATABASE} with action ${params.ROLLBACK_ACTION} failed. Check the logs at s3://${S3_BUCKET}/${s3LogKey} and investigate.")
             }
         }
     }
